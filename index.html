@@ -599,6 +599,7 @@
     .auth-btns { display: flex; gap: 8px; }
     .auth-btns button { flex: 1; padding: 12px; border-radius: 12px; font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; border: 1px solid var(--border); background: var(--surface); color: var(--text); transition: all 0.2s; }
     .auth-btns button:hover { border-color: var(--border-bright); }
+    .auth-btns button:disabled { opacity: 0.6; cursor: default; }
     .auth-btns button.primary { border: none; background: linear-gradient(135deg, var(--primary), var(--primary-glow)); color: #fff; box-shadow: 0 0 18px rgba(93, 51, 176, 0.4); }
 
     @media (max-width: 760px) {
@@ -700,7 +701,7 @@ const GRADS = [['#5d33b0', '#9b6dff'], ['#e11d48', '#fb7185'], ['#0891b2', '#22d
                ['#ca8a04', '#facc15'], ['#059669', '#34d399'], ['#db2777', '#f472b6']];
 const gradient = (id) => `linear-gradient(135deg, ${GRADS[id % GRADS.length][0]}, ${GRADS[id % GRADS.length][1]})`;
 
-const toDate = (s) => new Date(s.replace(' ', 'T') + 'Z');
+const toDate = (s) => new Date(s);
 const fmtTime = (d) => d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 const daysAgo = (d) => Math.round((new Date().setHours(0, 0, 0, 0) - new Date(d).setHours(0, 0, 0, 0)) / 864e5);
 
@@ -719,10 +720,9 @@ function fmtDay(d) {
 }
 
 async function api(path, opts = {}) {
-  const r = await fetch('/api/' + path, {
-    ...opts,
-    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
-  const data = await r.json().catch(() => ({}));
-  
+  let r;
+  try {
+    r = await fetch('/api/' + path, {
+      ...opts,
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+      body: opts.body ? JSON.stringify(opts.body) : undefin
