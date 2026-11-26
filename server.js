@@ -25,9 +25,12 @@ db.exec(`
 
 const app = express();
 app.use(express.json());
-app.get('/', (req, res) => res.sendFile(__dirname + '/index.html'));
 const server = http.createServer(app);
 const io = new Server(server);
+
+// Файлы лежат в корне репозитория, поэтому отдаём только нужные
+app.get('/', (req, res) => res.sendFile(__dirname + '/index.html'));
+app.get('/logo.jpg', (req, res) => res.sendFile(__dirname + '/logo.jpg'));
 
 const sign = (u) => jwt.sign({ id: u.id, username: u.username }, SECRET, { expiresIn: '7d' });
 
@@ -51,6 +54,7 @@ app.post('/api/register', (req, res) => {
       .prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)')
       .run(username, bcrypt.hashSync(password, 10));
     const user = { id: Number(r.lastInsertRowid), username };
+    io.emit('users-changed');
     res.json({ token: sign(user), user });
   } catch {
     res.status(409).json({ error: 'Это имя уже занято' });
@@ -67,8 +71,20 @@ app.post('/api/login', (req, res) => {
   res.json({ token: sign(user), user });
 });
 
+// Список собеседников с последним сообщением для превью
 app.get('/api/users', auth, (req, res) => {
-  res.json(db.prepare('SELECT id, username FROM users WHERE id != ? ORDER BY username').all(req.user.id));
+  const pair = `((m.from_id = u.id AND m.to_id = @me) OR (m.from_id = @me AND m.to_id = u.id))`;
+  const rows = db
+    .prepare(
+      `SELECT u.id, u.username,
+        (SELECT m.text FROM messages m WHERE ${pair} ORDER BY m.id DESC LIMIT 1) AS last_text,
+        (SELECT m.from_id FROM messages m WHERE ${pair} ORDER BY m.id DESC LIMIT 1) AS last_from,
+        (SELECT m.created_at FROM messages m WHERE ${pair} ORDER BY m.id DESC LIMIT 1) AS last_at
+       FROM users u WHERE u.id != @me
+       ORDER BY last_at IS NULL, last_at DESC, u.username`
+    )
+    .all({ me: req.user.id });
+  res.json(rows);
 });
 
 // История переписки; ?before=<id> подгружает более старые сообщения
@@ -95,9 +111,15 @@ io.use((socket, next) => {
   }
 });
 
+const online = new Map(); // userId -> число открытых соединений
+
 io.on('connection', (socket) => {
   const me = socket.user.id;
   socket.join('user:' + me);
+
+  online.set(me, (online.get(me) || 0) + 1);
+  if (online.get(me) === 1) socket.broadcast.emit('presence', { id: me, online: true });
+  socket.emit('online', [...online.keys()]);
 
   socket.on('message', ({ to, text }) => {
     text = String(text || '').trim().slice(0, 4000);
@@ -107,7 +129,17 @@ io.on('connection', (socket) => {
     const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(r.lastInsertRowid);
     io.to('user:' + to).to('user:' + me).emit('message', msg);
   });
+
+  socket.on('disconnect', () => {
+    const n = (online.get(me) || 1) - 1;
+    if (n <= 0) {
+      online.delete(me);
+      io.emit('presence', { id: me, online: false });
+    } else {
+      online.set(me, n);
+    }
+  });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('http://localhost:' + PORT));
+server.listen(PORT, () => console.log('Lirian: http://localhost:' + PORT));
