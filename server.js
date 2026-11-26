@@ -1,27 +1,42 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const Database = require('better-sqlite3');
+const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
 const SECRET = process.env.JWT_SECRET || 'change-me-in-production';
-const db = new Database('chat.db');
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY,
+
+if (!process.env.DATABASE_URL) {
+  console.error('Не задана переменная окружения DATABASE_URL (строка подключения к PostgreSQL)');
+  process.exit(1);
+}
+
+// SSL включаем явно, параметр sslmode из строки убираем, чтобы он не перебивал настройку
+let connectionString = process.env.DATABASE_URL;
+try {
+  const u = new URL(connectionString);
+  u.searchParams.delete('sslmode');
+  connectionString = u.toString();
+} catch { /* оставляем как есть */ }
+const pool = new Pool({ connectionString, ssl: { rejectUnauthorized: false }, max: 5 });
+const q = (text, params) => pool.query(text, params);
+
+async function init() {
+  await q(`CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY,
+  )`);
+  await q(`CREATE TABLE IF NOT EXISTS messages (
+    id SERIAL PRIMARY KEY,
     from_id INTEGER NOT NULL,
     to_id INTEGER NOT NULL,
     text TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE INDEX IF NOT EXISTS idx_pair ON messages (from_id, to_id, id);
-`);
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  await q('CREATE INDEX IF NOT EXISTS idx_pair ON messages (from_id, to_id, id)');
+}
 
 const app = express();
 app.use(express.json());
@@ -32,79 +47,95 @@ const io = new Server(server);
 app.get('/', (req, res) => res.sendFile(__dirname + '/index.html'));
 app.get('/logo.jpg', (req, res) => res.sendFile(__dirname + '/logo.jpg'));
 
-const sign = (u) => jwt.sign({ id: u.id, username: u.username }, SECRET, { expiresIn: '7d' });
+const wrap = (fn) => (req, res, next) =>
+  fn(req, res, next).catch((e) => {
+    console.error(e);
+    res.status(500).json({ error: 'Ошибка сервера, попробуйте ещё раз' });
+  });
 
-function auth(req, res, next) {
-  try {
-    const token = (req.headers.authorization || '').replace('Bearer ', '');
-    req.user = jwt.verify(token, SECRET);
-    next();
-  } catch {
-    res.status(401).json({ error: 'Требуется вход' });
-  }
-}
+const sign = (u) => jwt.sign({ id: u.id, username: u.username }, SECRET, { expiresIn: '30d' });
 
-app.post('/api/register', (req, res) => {
-  const { username, password } = req.body || {};
-  if (!/^[\w.-]{3,20}$/.test(username || '') || (password || '').length < 6) {
-    return res.status(400).json({ error: 'Имя: 3–20 символов, пароль: от 6' });
-  }
+// Токен должен быть верным, а пользователь — существовать в базе
+const auth = wrap(async (req, res, next) => {
+  let payload;
   try {
-    const r = db
-      .prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)')
-      .run(username, bcrypt.hashSync(password, 10));
-    const user = { id: Number(r.lastInsertRowid), username };
-    io.emit('users-changed');
-    res.json({ token: sign(user), user });
+    payload = jwt.verify((req.headers.authorization || '').replace('Bearer ', ''), SECRET);
   } catch {
-    res.status(409).json({ error: 'Это имя уже занято' });
+    return res.status(401).json({ error: 'Требуется вход' });
   }
+  const r = await q('SELECT id, username FROM users WHERE id = $1', [payload.id]);
+  if (!r.rows[0]) return res.status(401).json({ error: 'Требуется вход' });
+  req.user = r.rows[0];
+  next();
 });
 
-app.post('/api/login', (req, res) => {
+app.post('/api/register', wrap(async (req, res) => {
   const { username, password } = req.body || {};
-  const row = db.prepare('SELECT * FROM users WHERE username = ?').get(username || '');
-  if (!row || !bcrypt.compareSync(password || '', row.password_hash)) {
+  if (!/^[\p{L}\d_.-]{3,20}$/u.test(username || '') || (password || '').length < 6) {
+    return res.status(400).json({ error: 'Имя: 3–20 символов (буквы, цифры, _ . -), пароль: от 6 символов' });
+  }
+  try {
+    const hash = await bcrypt.hash(password, 10);
+    const r = await q('INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id, username', [username, hash]);
+    const user = r.rows[0];
+    io.emit('users-changed');
+    res.json({ token: sign(user), user });
+  } catch (e) {
+    if (e.code === '23505') return res.status(409).json({ error: 'Это имя уже занято' });
+    throw e;
+  }
+}));
+
+app.post('/api/login', wrap(async (req, res) => {
+  const { username, password } = req.body || {};
+  const r = await q('SELECT * FROM users WHERE username = $1', [String(username || '')]);
+  const row = r.rows[0];
+  if (!row || !(await bcrypt.compare(String(password || ''), row.password_hash))) {
     return res.status(401).json({ error: 'Неверное имя или пароль' });
   }
   const user = { id: row.id, username: row.username };
   res.json({ token: sign(user), user });
-});
+}));
 
 // Список собеседников с последним сообщением для превью
-app.get('/api/users', auth, (req, res) => {
-  const pair = `((m.from_id = u.id AND m.to_id = @me) OR (m.from_id = @me AND m.to_id = u.id))`;
-  const rows = db
-    .prepare(
-      `SELECT u.id, u.username,
-        (SELECT m.text FROM messages m WHERE ${pair} ORDER BY m.id DESC LIMIT 1) AS last_text,
-        (SELECT m.from_id FROM messages m WHERE ${pair} ORDER BY m.id DESC LIMIT 1) AS last_from,
-        (SELECT m.created_at FROM messages m WHERE ${pair} ORDER BY m.id DESC LIMIT 1) AS last_at
-       FROM users u WHERE u.id != @me
-       ORDER BY last_at IS NULL, last_at DESC, u.username`
-    )
-    .all({ me: req.user.id });
-  res.json(rows);
-});
+app.get('/api/users', auth, wrap(async (req, res) => {
+  const r = await q(
+    `SELECT u.id, u.username, lm.text AS last_text, lm.from_id AS last_from, lm.created_at AS last_at
+     FROM users u
+     LEFT JOIN LATERAL (
+       SELECT m.text, m.from_id, m.created_at FROM messages m
+       WHERE (m.from_id = u.id AND m.to_id = $1) OR (m.from_id = $1 AND m.to_id = u.id)
+       ORDER BY m.id DESC LIMIT 1
+     ) lm ON true
+     WHERE u.id <> $1
+     ORDER BY lm.created_at DESC NULLS LAST, u.username`,
+    [req.user.id]
+  );
+  res.json(r.rows);
+}));
 
 // История переписки; ?before=<id> подгружает более старые сообщения
-app.get('/api/messages/:peerId', auth, (req, res) => {
-  const me = req.user.id;
+app.get('/api/messages/:peerId', auth, wrap(async (req, res) => {
   const peer = Number(req.params.peerId);
-  const before = Number(req.query.before) || 9e15;
-  const rows = db
-    .prepare(
-      `SELECT * FROM messages
-       WHERE ((from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)) AND id < ?
-       ORDER BY id DESC LIMIT 50`
-    )
-    .all(me, peer, peer, me, before);
-  res.json(rows.reverse());
-});
+  if (!Number.isInteger(peer)) return res.status(400).json({ error: 'Неверный собеседник' });
+  const before = Number(req.query.before) || 2147483647;
+  const r = await q(
+    `SELECT * FROM (
+       SELECT id, from_id, to_id, text, created_at FROM messages
+       WHERE ((from_id = $1 AND to_id = $2) OR (from_id = $2 AND to_id = $1)) AND id < $3
+       ORDER BY id DESC LIMIT 50
+     ) t ORDER BY id`,
+    [req.user.id, peer, before]
+  );
+  res.json(r.rows);
+}));
 
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   try {
-    socket.user = jwt.verify(socket.handshake.auth.token, SECRET);
+    const p = jwt.verify(socket.handshake.auth.token, SECRET);
+    const r = await q('SELECT id, username FROM users WHERE id = $1', [p.id]);
+    if (!r.rows[0]) throw new Error('no user');
+    socket.user = r.rows[0];
     next();
   } catch {
     next(new Error('unauthorized'));
@@ -121,13 +152,22 @@ io.on('connection', (socket) => {
   if (online.get(me) === 1) socket.broadcast.emit('presence', { id: me, online: true });
   socket.emit('online', [...online.keys()]);
 
-  socket.on('message', ({ to, text }) => {
-    text = String(text || '').trim().slice(0, 4000);
-    to = Number(to);
-    if (!text || !db.prepare('SELECT 1 FROM users WHERE id = ?').get(to)) return;
-    const r = db.prepare('INSERT INTO messages (from_id, to_id, text) VALUES (?, ?, ?)').run(me, to, text);
-    const msg = db.prepare('SELECT * FROM messages WHERE id = ?').get(r.lastInsertRowid);
-    io.to('user:' + to).to('user:' + me).emit('message', msg);
+  socket.on('message', async (data) => {
+    try {
+      const { to, text: raw } = data || {};
+      const text = String(raw || '').trim().slice(0, 4000);
+      const toId = Number(to);
+      if (!text || !Number.isInteger(toId)) return;
+      const exists = await q('SELECT 1 FROM users WHERE id = $1', [toId]);
+      if (!exists.rowCount) return;
+      const r = await q(
+        'INSERT INTO messages (from_id, to_id, text) VALUES ($1, $2, $3) RETURNING id, from_id, to_id, text, created_at',
+        [me, toId, text]
+      );
+      io.to('user:' + toId).to('user:' + me).emit('message', r.rows[0]);
+    } catch (e) {
+      console.error(e);
+    }
   });
 
   socket.on('disconnect', () => {
@@ -142,4 +182,6 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('Lirian: http://localhost:' + PORT));
+init()
+  .then(() => server.listen(PORT, () => console.log('Lirian: http://localhost:' + PORT)))
+  .catch((e) => { console.error('Не удалось подключиться к базе:', e.message); process.exit(1); });
