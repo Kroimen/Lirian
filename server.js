@@ -47,6 +47,33 @@ const io = new Server(server);
 app.get('/', (req, res) => res.sendFile(__dirname + '/index.html'));
 app.get('/logo.jpg', (req, res) => res.sendFile(__dirname + '/logo.jpg'));
 
+// Диагностическая страница: показывает, выполняется ли JavaScript и что приходит с сервера
+const TEST_HTML = `<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Диагностика</title></head>
+<body style="font:16px/1.4 system-ui,sans-serif;padding:16px;background:#111;color:#eee">
+<h3 id="s">⚠ JavaScript не выполняется</h3>
+<pre id="o" style="white-space:pre-wrap;font-size:13px;color:#bbb"></pre>
+<script>
+var o = document.getElementById('o'), s = document.getElementById('s');
+s.textContent = '✓ JavaScript работает';
+function log(t) { o.textContent += t + '\\n\\n'; }
+log('Браузер: ' + navigator.userAgent);
+log('Адрес: ' + location.href);
+fetch('/api/users').then(function (r) { log('/api/users → HTTP ' + r.status); }).catch(function (e) { log('/api/users ошибка: ' + e.message); });
+fetch('/').then(function (r) {
+  var h = [];
+  r.headers.forEach(function (v, k) { h.push(k + ': ' + v); });
+  log('Заголовки главной страницы:\\n' + h.join('\\n'));
+  return r.text();
+}).then(function (t) {
+  log('Размер главной страницы: ' + t.length + ' символов');
+  log('Есть конец файла: ' + (t.indexOf('</ht' + 'ml>') > -1));
+  log('Скрипт-блоков в ней: ' + (t.split('<scr' + 'ipt').length - 1));
+}).catch(function (e) { log('Главная страница, ошибка: ' + e.message); });
+</script>
+</body></html>`;
+app.get('/test', (req, res) => res.type('html').send(TEST_HTML));
+
 const wrap = (fn) => (req, res, next) =>
   fn(req, res, next).catch((e) => {
     console.error(e);
