@@ -44,7 +44,7 @@
       <button id="login" class="primary">Войти</button>
       <button id="register">Создать аккаунт</button>
     </div>
-    <div class="ver" id="ver">версия 8 · скрипт не запущен</div>
+    <div class="ver" id="ver">версия 9 · скрипт не запущен</div>
   </div>
 </div>
 
@@ -98,6 +98,16 @@
 
 <div id="lightbox" class="hidden"><img id="lightImg" alt=""></div>
 
+<div id="wallModal" class="modal hidden">
+  <div class="modal-card wall-card">
+    <div class="prof-name">Обои чата</div>
+    <div id="wallGrid" class="wall-grid"></div>
+    <input type="file" id="wallFile" accept="image/*" class="hidden">
+    <div id="wallErr" class="prof-err"></div>
+    <button id="closeWall" type="button" class="pbtn primary">Готово</button>
+  </div>
+</div>
+
 <div id="profile" class="modal hidden">
   <div class="modal-card">
     <div id="profAvatar" class="prof-avatar"></div>
@@ -108,12 +118,14 @@
       <button id="removePhoto" type="button" class="pbtn">Убрать фото</button>
     </div>
     <div id="profErr" class="prof-err"></div>
+    <button id="openWall" type="button" class="pbtn">Обои чата</button>
     <button id="logoutBtn" type="button" class="pbtn danger">Выйти из аккаунта</button>
     <button id="closeProfile" type="button" class="pbtn ghost">Закрыть</button>
   </div>
 </div>
 
 <script src="/photos.js"></script>
+<script src="/wallpapers.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

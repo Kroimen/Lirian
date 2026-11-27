@@ -38,6 +38,9 @@ async function init() {
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
   await q('ALTER TABLE messages ADD COLUMN IF NOT EXISTS image BYTEA');
+  await q("ALTER TABLE users ADD COLUMN IF NOT EXISTS wallpaper TEXT NOT NULL DEFAULT ''");
+  await q('ALTER TABLE users ADD COLUMN IF NOT EXISTS wallpaper_img BYTEA');
+  await q('ALTER TABLE users ADD COLUMN IF NOT EXISTS wallpaper_v INTEGER NOT NULL DEFAULT 0');
   await q('CREATE INDEX IF NOT EXISTS idx_pair ON messages (from_id, to_id, id)');
 }
 
@@ -48,7 +51,7 @@ const io = new Server(server);
 
 // Файлы лежат в корне репозитория, поэтому отдаём только нужные
 app.get('/', (req, res) => res.sendFile(__dirname + '/index.html'));
-for (const f of ['logo.jpg', 'base.css', 'extra.css', 'photos.js', 'app.js']) {
+for (const f of ['logo.jpg', 'base.css', 'extra.css', 'photos.js', 'wallpapers.js', 'app.js']) {
   app.get('/' + f, (req, res) => res.sendFile(__dirname + '/' + f));
 }
 
@@ -75,7 +78,7 @@ fetch('/').then(function (r) {
   log('Есть конец файла: ' + (t.indexOf('</ht' + 'ml>') > -1));
   log('Скрипт-блоков в ней: ' + (t.split('<scr' + 'ipt').length - 1));
 }).catch(function (e) { log('Главная страница, ошибка: ' + e.message); });
-['/', '/base.css', '/extra.css', '/photos.js', '/app.js'].forEach(function (u) {
+['/', '/base.css', '/extra.css', '/photos.js', '/wallpapers.js', '/app.js'].forEach(function (u) {
   fetch(u, { cache: 'no-store' }).then(function (r) { return r.text(); }).then(function (t) {
     var ok = t.slice(-30).indexOf('END') > -1 || t.indexOf('</ht' + 'ml>') > -1;
     log('Файл ' + u + ': ' + t.length + ' символов, конец на месте: ' + ok);
@@ -139,7 +142,12 @@ app.post('/api/login', wrap(async (req, res) => {
 }));
 
 app.get('/api/me', auth, wrap(async (req, res) => {
-  const r = await q('SELECT id, username, avatar_v, (avatar IS NOT NULL) AS has_avatar FROM users WHERE id = $1', [req.user.id]);
+  const r = await q(
+    `SELECT id, username, avatar_v, (avatar IS NOT NULL) AS has_avatar,
+            wallpaper, wallpaper_v, (wallpaper_img IS NOT NULL) AS has_wallpaper_img
+     FROM users WHERE id = $1`,
+    [req.user.id]
+  );
   res.json(r.rows[0]);
 }));
 
@@ -168,6 +176,40 @@ app.delete('/api/avatar', auth, wrap(async (req, res) => {
   const r = await q('UPDATE users SET avatar = NULL, avatar_v = avatar_v + 1 WHERE id = $1 RETURNING avatar_v', [req.user.id]);
   io.emit('avatar-changed', { id: req.user.id, has: false, v: r.rows[0].avatar_v });
   res.json({ avatar_v: r.rows[0].avatar_v });
+}));
+
+// Обои чата: готовый узор (id задаёт клиент) или своё фото
+app.put('/api/wallpaper', auth, wrap(async (req, res) => {
+  const w = String((req.body || {}).wallpaper || '');
+  if (!/^[a-z]{0,20}$/.test(w)) return res.status(400).json({ error: 'Неверные обои' });
+  const r = await q(
+    "UPDATE users SET wallpaper = $1 WHERE id = $2 AND ($1 <> 'custom' OR wallpaper_img IS NOT NULL) RETURNING id",
+    [w, req.user.id]
+  );
+  if (!r.rowCount) return res.status(400).json({ error: 'Сначала загрузи своё фото' });
+  io.to('user:' + req.user.id).emit('wallpaper-changed');
+  res.json({ wallpaper: w });
+}));
+
+app.put('/api/wallpaper-image', auth, express.raw({ type: 'image/*', limit: '2mb' }), wrap(async (req, res) => {
+  const buf = req.body;
+  if (!Buffer.isBuffer(buf) || buf.length < 100 || buf[0] !== 0xff || buf[1] !== 0xd8) {
+    return res.status(400).json({ error: 'Нужна картинка в формате JPEG' });
+  }
+  const r = await q(
+    "UPDATE users SET wallpaper_img = $1, wallpaper = 'custom', wallpaper_v = wallpaper_v + 1 WHERE id = $2 RETURNING wallpaper_v",
+    [buf, req.user.id]
+  );
+  io.to('user:' + req.user.id).emit('wallpaper-changed');
+  res.json({ wallpaper: 'custom', wallpaper_v: r.rows[0].wallpaper_v });
+}));
+
+app.get('/api/wallpaper-image', auth, wrap(async (req, res) => {
+  const r = await q('SELECT wallpaper_img FROM users WHERE id = $1', [req.user.id]);
+  const buf = r.rows[0] && r.rows[0].wallpaper_img;
+  if (!buf) return res.status(404).end();
+  res.set({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, no-cache' });
+  res.send(buf);
 }));
 
 // Фото в сообщениях (клиент заранее сжимает их до 1280 px JPEG)

@@ -67,4 +67,13 @@
 /* ---- Избранное ---- */
 .avatar.fav { background: linear-gradient(135deg, #5d33b0, #c084fc); font-size: 20px; }
 .empty-note { margin: auto; max-width: 260px; text-align: center; color: var(--text-dim); font-size: 13px; line-height: 1.5; }
+
+/* ---- обои чата ---- */
+.wall-card { max-width: 360px; max-height: 90vh; overflow-y: auto; }
+.wall-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; width: 100%; }
+.wall-tile { position: relative; height: 104px; border-radius: 12px; border: 2px solid transparent; overflow: hidden; cursor: pointer; background-color: #1a0b3d; }
+.wall-tile.sel { border-color: var(--primary-glow); box-shadow: 0 0 14px rgba(93, 51, 176, 0.6); }
+.wall-tile span { position: absolute; left: 0; right: 0; bottom: 0; padding: 4px 2px; font-size: 11px; text-align: center; background: rgba(8, 5, 20, 0.65); }
+.wall-add { display: flex; align-items: center; justify-content: center; font-size: 26px; color: var(--text-muted); border: 2px dashed var(--border-bright); }
+.wall-add span { font-size: 11px; }
 /* END */

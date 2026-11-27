@@ -162,6 +162,9 @@ async function start() {
   socket.on('online', (ids) => { online.clear(); ids.forEach((i) => online.add(i)); renderUsers(); updateHeader(); });
   socket.on('presence', ({ id, online: on }) => { on ? online.add(id) : online.delete(id); renderUsers(); updateHeader(); });
   socket.on('users-changed', loadUsers);
+  socket.on('wallpaper-changed', async () => {
+    try { me = await api('me'); store.set('me', JSON.stringify(me)); applyWallpaper(); } catch { /* ничего */ }
+  });
   socket.on('avatar-changed', ({ id, has, v }) => {
     if (id === me.id) { setMyAvatar(has, v); return; }
     const u = users.find((x) => x.id === id);
@@ -170,7 +173,7 @@ async function start() {
     if (peer && peer.id === id) { peer = u; updateHeader(); }
     renderUsers();
   });
-  try { me = await api('me'); store.set('me', JSON.stringify(me)); renderMe(); } catch { /* при 401 api() сам разлогинит */ }
+  try { me = await api('me'); store.set('me', JSON.stringify(me)); renderMe(); applyWallpaper(); } catch { /* при 401 api() сам разлогинит */ }
   try { await loadUsers(); } catch { logout(); }
 }
 
@@ -344,6 +347,7 @@ $('text').addEventListener('input', (e) => {
   e.target.style.height = Math.min(e.target.scrollHeight, 110) + 'px';
 });
 
-$('ver').textContent = 'версия 8 · готово';
+initWallpapers();
+$('ver').textContent = 'версия 9 · готово';
 if (token && me) start();
 // END
