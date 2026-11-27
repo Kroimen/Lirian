@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lirian</title>
+  <link rel="icon" href="/logo.jpg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="/base.css">
+  <link rel="stylesheet" href="/extra.css">
+</head>
+<body>
+<script>
+(function () {
+  function show(msg) {
+    var b = document.getElementById('fatal');
+    if (!b) {
+      b = document.createElement('div');
+      b.id = 'fatal';
+      b.setAttribute('style', 'position:fixed;left:0;right:0;top:0;z-index:999;background:#b91c1c;color:#fff;padding:10px 14px;font:13px/1.4 system-ui,sans-serif');
+      b.onclick = function () { b.remove(); };
+      document.documentElement.appendChild(b);
+    }
+    b.textContent = 'Ошибка на странице: ' + msg + ' (нажмите, чтобы скрыть)';
+  }
+  window.addEventListener('error', function (e) { show(e.message + (e.lineno ? ' [строка ' + e.lineno + ']' : '')); });
+  window.addEventListener('unhandledrejection', function (e) { show(String((e.reason && e.reason.message) || e.reason)); });
+})();
+</script>
+
+<div id="auth">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <img src="/logo.jpg" alt="Lirian">
+      <div class="logo-text">Lirian</div>
+    </div>
+    <div class="field"><input id="username" placeholder="Имя пользователя" autocomplete="username" autocapitalize="none"></div>
+    <div class="field"><input id="password" type="password" placeholder="Пароль (от 6 символов)" autocomplete="current-password"></div>
+    <div id="err"></div>
+    <div class="auth-btns">
+      <button id="login" class="primary">Войти</button>
+      <button id="register">Создать аккаунт</button>
+    </div>
+    <div class="ver" id="ver">версия 5 · скрипт не запущен</div>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <div class="logo-mark"><img src="/logo.jpg" alt="Lirian"></div>
+        <div class="logo-text">Lirian</div>
+      </div>
+      <button class="icon-btn" id="menu" title="Выйти">☰</button>
+    </div>
+    <div class="search-wrap">
+      <div class="search">
+        <span class="search-icon">⌕</span>
+        <input type="text" id="search" placeholder="Поиск контактов">
+      </div>
+    </div>
+    <div class="chat-list" id="chatList"></div>
+  </aside>
+
+  <main class="main">
+    <div class="placeholder" id="placeholder">
+      <img src="/logo.jpg" alt="">
+      <div>Выберите чат, чтобы начать переписку</div>
+    </div>
+
+    <div id="chatView" class="hidden">
+      <div class="chat-header">
+        <button class="icon-btn back-btn" id="back" aria-label="Назад">←</button>
+        <div id="headAvatar"></div>
+        <div class="header-info">
+          <div class="header-name" id="headName"></div>
+          <div class="header-status" id="headStatus"></div>
+        </div>
+      </div>
+
+      <div class="messages" id="messages"></div>
+
+      <div class="input-area">
+        <button class="tool-btn" type="button">＋</button>
+        <div class="input-box">
+          <textarea id="text" rows="1" placeholder="Написать сообщение..."></textarea>
+        </div>
+        <button class="send-btn" id="send" type="button">➤</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
