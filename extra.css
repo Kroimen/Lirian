@@ -63,4 +63,8 @@
 #lightbox { position: fixed; inset: 0; z-index: 95; background: rgba(5, 3, 14, 0.92); display: flex; align-items: center; justify-content: center; cursor: zoom-out; }
 #lightbox img { max-width: 96vw; max-height: 92vh; border-radius: 8px; }
 .toast { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%); z-index: 99; background: #b91c1c; color: #fff; padding: 10px 16px; border-radius: 12px; font-size: 14px; max-width: 90vw; }
+
+/* ---- Избранное ---- */
+.avatar.fav { background: linear-gradient(135deg, #5d33b0, #c084fc); font-size: 20px; }
+.empty-note { margin: auto; max-width: 260px; text-align: center; color: var(--text-dim); font-size: 13px; line-height: 1.5; }
 /* END */

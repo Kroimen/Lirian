@@ -213,7 +213,6 @@ app.get('/api/users', auth, wrap(async (req, res) => {
        WHERE (m.from_id = u.id AND m.to_id = $1) OR (m.from_id = $1 AND m.to_id = u.id)
        ORDER BY m.id DESC LIMIT 1
      ) lm ON true
-     WHERE u.id <> $1
      ORDER BY lm.created_at DESC NULLS LAST, u.username`,
     [req.user.id]
   );

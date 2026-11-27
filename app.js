@@ -181,6 +181,10 @@ async function loadUsers() {
 }
 
 /* ---------- список чатов ---------- */
+const isSelf = (u) => u.id === me.id;
+const displayName = (u) => (isSelf(u) ? 'Избранное' : u.username);
+const noteAvatar = () => el('div', 'avatar fav', '★');
+
 function makeAvatar(u, withStatus) {
   const a = el('div', 'avatar');
   if (u.has_avatar) a.style.background = 'center / cover url(/api/avatar/' + u.id + '?v=' + (u.avatar_v || 0) + ')';
@@ -193,35 +197,42 @@ function renderUsers() {
   const q = $('search').value.trim().toLowerCase();
   const box = $('chatList');
   box.innerHTML = '';
-  const list = users.filter((u) => u.username.toLowerCase().includes(q));
-  if (!list.length) box.append(el('div', 'list-empty', users.length ? 'Никого не найдено' : 'Пока здесь никого нет. Пригласите друга создать аккаунт'));
+  const list = users.filter((u) => displayName(u).toLowerCase().includes(q))
+    .sort((a, b) => isSelf(b) - isSelf(a));   // «Избранное» всегда сверху
+  if (!list.length) box.append(el('div', 'list-empty', 'Никого не найдено'));
   list.forEach((u) => {
     const item = el('div', 'chat-item' + (peer && peer.id === u.id ? ' active' : ''));
     const info = el('div', 'chat-info');
     const top = el('div', 'chat-top');
-    top.append(el('div', 'chat-name', u.username));
+    top.append(el('div', 'chat-name', displayName(u)));
     if (u.last_at) top.append(el('div', 'chat-time', fmtList(toDate(u.last_at))));
     const bottom = el('div', 'chat-bottom');
     const prev = el('div', 'chat-preview');
     if (u.last_text || u.last_image) {
-      if (u.last_from === me.id) prev.append(el('span', 'you', 'Вы · '));
+      if (u.last_from === me.id && !isSelf(u)) prev.append(el('span', 'you', 'Вы · '));
       prev.append(document.createTextNode((u.last_image ? '📷 ' : '') + (u.last_text || (u.last_image ? 'Фото' : ''))));
-    } else prev.textContent = 'Нет сообщений';
+    } else prev.textContent = isSelf(u) ? 'Заметки, ссылки и фото для себя' : 'Нет сообщений';
     bottom.append(prev);
     if (unread.get(u.id)) bottom.append(el('div', 'badge', String(unread.get(u.id))));
     info.append(top, bottom);
-    item.append(makeAvatar(u, true), info);
+    item.append(isSelf(u) ? noteAvatar() : makeAvatar(u, true), info);
     item.onclick = () => openChat(u);
     box.append(item);
   });
+  if (users.length === 1 && !q) box.append(el('div', 'list-empty', 'Пока здесь больше никого нет. Пригласи друга создать аккаунт'));
 }
 $('search').addEventListener('input', renderUsers);
 
 /* ---------- чат ---------- */
 function updateHeader() {
   if (!peer) return;
-  $('headAvatar').replaceChildren(makeAvatar(peer, true));
-  $('headName').textContent = peer.username;
+  $('headAvatar').replaceChildren(isSelf(peer) ? noteAvatar() : makeAvatar(peer, true));
+  $('headName').textContent = displayName(peer);
+  if (isSelf(peer)) {
+    $('headStatus').textContent = 'видишь только ты';
+    $('headStatus').classList.add('off');
+    return;
+  }
   const on = online.has(peer.id);
   $('headStatus').textContent = on ? 'в сети' : 'не в сети';
   $('headStatus').classList.toggle('off', !on);
@@ -239,7 +250,10 @@ async function openChat(u) {
   renderUsers();
   try {
     const msgs = await api('messages/' + u.id);
-    if (peer && peer.id === u.id) msgs.forEach(addMessage);
+    if (peer && peer.id === u.id) {
+      msgs.forEach(addMessage);
+      if (!msgs.length && isSelf(u)) $('messages').append(el('div', 'empty-note', 'Здесь можно хранить заметки, ссылки и фото для себя. Видишь их только ты'));
+    }
   } catch (e) { /* оставим пустой чат */ }
   if (window.matchMedia('(min-width: 761px)').matches) $('text').focus();
 }
@@ -249,6 +263,8 @@ function addMessage(m) {
   const d = toDate(m.created_at);
   const day = d.toDateString();
   const box = $('messages');
+  const hint = box.querySelector('.empty-note');
+  if (hint) hint.remove();
   if (day !== lastDay) { box.append(el('div', 'date-pill', fmtDay(d))); lastDay = day; }
   const out = m.from_id === me.id;
   const msg = el('div', 'message ' + (out ? 'out' : 'in'));
@@ -328,6 +344,6 @@ $('text').addEventListener('input', (e) => {
   e.target.style.height = Math.min(e.target.scrollHeight, 110) + 'px';
 });
 
-$('ver').textContent = 'версия 7 · готово';
+$('ver').textContent = 'версия 8 · готово';
 if (token && me) start();
 // END
