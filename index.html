@@ -599,6 +599,7 @@
     .auth-btns { display: flex; gap: 8px; }
     .auth-btns button { flex: 1; padding: 12px; border-radius: 12px; font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; border: 1px solid var(--border); background: var(--surface); color: var(--text); transition: all 0.2s; }
     .auth-btns button:hover { border-color: var(--border-bright); }
+    .ver { margin-top: 16px; text-align: center; font-size: 11px; color: var(--text-dim); }
     .auth-btns button:disabled { opacity: 0.6; cursor: default; }
     .auth-btns button.primary { border: none; background: linear-gradient(135deg, var(--primary), var(--primary-glow)); color: #fff; box-shadow: 0 0 18px rgba(93, 51, 176, 0.4); }
 
@@ -617,6 +618,23 @@
   </style>
 </head>
 <body>
+<script>
+(function () {
+  function show(msg) {
+    var b = document.getElementById('fatal');
+    if (!b) {
+      b = document.createElement('div');
+      b.id = 'fatal';
+      b.setAttribute('style', 'position:fixed;left:0;right:0;top:0;z-index:999;background:#b91c1c;color:#fff;padding:10px 14px;font:13px/1.4 system-ui,sans-serif');
+      b.onclick = function () { b.remove(); };
+      document.documentElement.appendChild(b);
+    }
+    b.textContent = 'Ошибка на странице: ' + msg + ' (нажмите, чтобы скрыть)';
+  }
+  window.addEventListener('error', function (e) { show(e.message + (e.lineno ? ' [строка ' + e.lineno + ']' : '')); });
+  window.addEventListener('unhandledrejection', function (e) { show(String((e.reason && e.reason.message) || e.reason)); });
+})();
+</script>
 
 <div id="auth">
   <div class="auth-card">
@@ -631,6 +649,7 @@
       <button id="login" class="primary">Войти</button>
       <button id="register">Создать аккаунт</button>
     </div>
+    <div class="ver">версия 3</div>
   </div>
 </div>
 
@@ -691,38 +710,16 @@ function el(tag, cls, text) {
   return e;
 }
 
-let token = localStorage.getItem('token');
-let me = JSON.parse(localStorage.getItem('me') || 'null');
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* ничего */ } },
+  clear() { try { localStorage.clear(); } catch { /* ничего */ } },
+};
+let token = store.get('token');
+let me = null;
+try { me = JSON.parse(store.get('me') || 'null'); } catch { me = null; }
 let socket = null, peer = null, users = [], lastDay = '';
 const unread = new Map();   // id собеседника -> число непрочитанных
 const online = new Set();   // id пользователей в сети
 
-const GRADS = [['#5d33b0', '#9b6dff'], ['#e11d48', '#fb7185'], ['#0891b2', '#22d3ee'],
-               ['#ca8a04', '#facc15'], ['#059669', '#34d399'], ['#db2777', '#f472b6']];
-const gradient = (id) => `linear-gradient(135deg, ${GRADS[id % GRADS.length][0]}, ${GRADS[id % GRADS.length][1]})`;
-
-const toDate = (s) => new Date(s);
-const fmtTime = (d) => d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-const daysAgo = (d) => Math.round((new Date().setHours(0, 0, 0, 0) - new Date(d).setHours(0, 0, 0, 0)) / 864e5);
-
-function fmtList(d) {
-  const n = daysAgo(d);
-  if (n <= 0) return fmtTime(d);
-  if (n === 1) return 'вчера';
-  if (n < 7) return d.toLocaleDateString('ru-RU', { weekday: 'short' });
-  return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
-}
-function fmtDay(d) {
-  const n = daysAgo(d);
-  if (n <= 0) return 'Сегодня';
-  if (n === 1) return 'Вчера';
-  return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
-}
-
-async function api(path, opts = {}) {
-  let r;
-  try {
-    r = await fetch('/api/' + path, {
-      ...opts,
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
-      body: opts.body ? JSON.stringify(opts.body) : undefin
+const GRADS = [['#5d33b0', '#9b6dff'], ['#e11d48', '#fb7185'], ['#0891b2', 
