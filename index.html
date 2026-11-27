@@ -44,7 +44,7 @@
       <button id="login" class="primary">Войти</button>
       <button id="register">Создать аккаунт</button>
     </div>
-    <div class="ver" id="ver">версия 6 · скрипт не запущен</div>
+    <div class="ver" id="ver">версия 7 · скрипт не запущен</div>
   </div>
 </div>
 
@@ -85,7 +85,8 @@
       <div class="messages" id="messages"></div>
 
       <div class="input-area">
-        <button class="tool-btn" type="button">＋</button>
+        <button class="tool-btn" id="attach" type="button" title="Фото">＋</button>
+        <input type="file" id="photoFile" accept="image/*" multiple class="hidden">
         <div class="input-box">
           <textarea id="text" rows="1" placeholder="Написать сообщение..."></textarea>
         </div>
@@ -94,6 +95,8 @@
     </div>
   </main>
 </div>
+
+<div id="lightbox" class="hidden"><img id="lightImg" alt=""></div>
 
 <div id="profile" class="modal hidden">
   <div class="modal-card">
@@ -110,6 +113,7 @@
   </div>
 </div>
 
+<script src="/photos.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

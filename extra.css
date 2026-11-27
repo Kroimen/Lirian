@@ -40,7 +40,6 @@
       .messages { padding: 16px 14px; }
       .message { max-width: 88%; }
       .input-area { padding: 10px 12px 12px; }
-      .input-area .tool-btn { display: none; }
     }
 
 /* ---- профиль и аватарка ---- */
@@ -57,4 +56,11 @@
 .pbtn.danger { color: #fb7185; }
 .pbtn.ghost { background: transparent; border-color: transparent; color: var(--text-dim); }
 .prof-err { min-height: 18px; font-size: 13px; color: #fb7185; text-align: center; }
+
+/* ---- фото в чате ---- */
+.msg-img { display: block; width: 260px; max-width: 100%; max-height: 360px; object-fit: cover; border-radius: 10px; background: var(--surface); cursor: zoom-in; margin-bottom: 4px; }
+.tool-btn:disabled { opacity: 0.5; cursor: default; }
+#lightbox { position: fixed; inset: 0; z-index: 95; background: rgba(5, 3, 14, 0.92); display: flex; align-items: center; justify-content: center; cursor: zoom-out; }
+#lightbox img { max-width: 96vw; max-height: 92vh; border-radius: 8px; }
+.toast { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%); z-index: 99; background: #b91c1c; color: #fff; padding: 10px 16px; border-radius: 12px; font-size: 14px; max-width: 90vw; }
 /* END */

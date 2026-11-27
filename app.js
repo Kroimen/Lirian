@@ -203,9 +203,9 @@ function renderUsers() {
     if (u.last_at) top.append(el('div', 'chat-time', fmtList(toDate(u.last_at))));
     const bottom = el('div', 'chat-bottom');
     const prev = el('div', 'chat-preview');
-    if (u.last_text) {
+    if (u.last_text || u.last_image) {
       if (u.last_from === me.id) prev.append(el('span', 'you', 'Вы · '));
-      prev.append(document.createTextNode(u.last_text));
+      prev.append(document.createTextNode((u.last_image ? '📷 ' : '') + (u.last_text || (u.last_image ? 'Фото' : ''))));
     } else prev.textContent = 'Нет сообщений';
     bottom.append(prev);
     if (unread.get(u.id)) bottom.append(el('div', 'badge', String(unread.get(u.id))));
@@ -256,7 +256,18 @@ function addMessage(m) {
   const meta = el('div', 'bubble-meta');
   meta.append(el('span', null, fmtTime(d)));
   if (out) meta.append(el('span', 'checks', '✓'));
-  bubble.append(el('div', 'bubble-text', m.text), meta);
+  if (m.has_image) {
+    const img = el('img', 'msg-img');
+    img.alt = 'Фото';
+    img.style.minHeight = '140px';
+    img.onload = () => { img.style.minHeight = ''; box.scrollTop = box.scrollHeight; };
+    photoUrl(m.id)
+      .then((u) => { img.src = u; img.onclick = () => openLightbox(u); })
+      .catch(() => img.replaceWith(el('div', 'bubble-text', '📷 Фото недоступно')));
+    bubble.append(img);
+  }
+  if (m.text) bubble.append(el('div', 'bubble-text', m.text));
+  bubble.append(meta);
   msg.append(bubble);
   box.append(msg);
   box.scrollTop = box.scrollHeight;
@@ -266,13 +277,38 @@ function onMessage(m) {
   const otherId = m.from_id === me.id ? m.to_id : m.from_id;
   const u = users.find((x) => x.id === otherId);
   if (u) {
-    u.last_text = m.text; u.last_from = m.from_id; u.last_at = m.created_at;
+    u.last_text = m.text; u.last_from = m.from_id; u.last_at = m.created_at; u.last_image = m.has_image;
     users.sort((a, b) => (b.last_at || '').localeCompare(a.last_at || '') || a.username.localeCompare(b.username));
   } else { loadUsers(); }
   if (peer && peer.id === otherId) addMessage(m);
   else if (m.from_id !== me.id) unread.set(otherId, (unread.get(otherId) || 0) + 1);
   renderUsers();
 }
+
+/* ---------- фото ---------- */
+function openLightbox(url) { $('lightImg').src = url; $('lightbox').classList.remove('hidden'); }
+$('lightbox').onclick = () => { $('lightbox').classList.add('hidden'); $('lightImg').src = ''; };
+$('attach').onclick = () => { if (peer) $('photoFile').click(); };
+$('photoFile').onchange = async () => {
+  const files = [...$('photoFile').files].slice(0, 10);
+  $('photoFile').value = '';
+  if (!files.length || !peer) return;
+  const to = peer.id;
+  $('attach').disabled = true;
+  try {
+    for (const f of files) {
+      const caption = $('text').value.trim();
+      const blob = await compressImage(f);
+      const r = await fetch('/api/photo/' + to + '?caption=' + encodeURIComponent(caption), {
+        method: 'POST', headers: { 'Content-Type': 'image/jpeg', Authorization: 'Bearer ' + token }, body: blob,
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || 'Ошибка сервера (' + r.status + ')'); }
+      $('text').value = '';
+      $('text').style.height = 'auto';
+    }
+  } catch (e) { toast(e.message); }
+  $('attach').disabled = false;
+};
 
 /* ---------- отправка ---------- */
 function send() {
@@ -292,6 +328,6 @@ $('text').addEventListener('input', (e) => {
   e.target.style.height = Math.min(e.target.scrollHeight, 110) + 'px';
 });
 
-$('ver').textContent = 'версия 6 · готово';
+$('ver').textContent = 'версия 7 · готово';
 if (token && me) start();
 // END

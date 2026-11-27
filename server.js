@@ -37,6 +37,7 @@ async function init() {
     text TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
+  await q('ALTER TABLE messages ADD COLUMN IF NOT EXISTS image BYTEA');
   await q('CREATE INDEX IF NOT EXISTS idx_pair ON messages (from_id, to_id, id)');
 }
 
@@ -47,7 +48,7 @@ const io = new Server(server);
 
 // Файлы лежат в корне репозитория, поэтому отдаём только нужные
 app.get('/', (req, res) => res.sendFile(__dirname + '/index.html'));
-for (const f of ['logo.jpg', 'base.css', 'extra.css', 'app.js']) {
+for (const f of ['logo.jpg', 'base.css', 'extra.css', 'photos.js', 'app.js']) {
   app.get('/' + f, (req, res) => res.sendFile(__dirname + '/' + f));
 }
 
@@ -74,7 +75,7 @@ fetch('/').then(function (r) {
   log('Есть конец файла: ' + (t.indexOf('</ht' + 'ml>') > -1));
   log('Скрипт-блоков в ней: ' + (t.split('<scr' + 'ipt').length - 1));
 }).catch(function (e) { log('Главная страница, ошибка: ' + e.message); });
-['/', '/base.css', '/extra.css', '/app.js'].forEach(function (u) {
+['/', '/base.css', '/extra.css', '/photos.js', '/app.js'].forEach(function (u) {
   fetch(u, { cache: 'no-store' }).then(function (r) { return r.text(); }).then(function (t) {
     var ok = t.slice(-30).indexOf('END') > -1 || t.indexOf('</ht' + 'ml>') > -1;
     log('Файл ' + u + ': ' + t.length + ' символов, конец на месте: ' + ok);
@@ -169,13 +170,46 @@ app.delete('/api/avatar', auth, wrap(async (req, res) => {
   res.json({ avatar_v: r.rows[0].avatar_v });
 }));
 
+// Фото в сообщениях (клиент заранее сжимает их до 1280 px JPEG)
+app.post('/api/photo/:to', auth, express.raw({ type: 'image/*', limit: '1500kb' }), wrap(async (req, res) => {
+  const to = Number(req.params.to);
+  const buf = req.body;
+  if (!Number.isInteger(to)) return res.status(400).json({ error: 'Неверный получатель' });
+  if (!Buffer.isBuffer(buf) || buf.length < 100 || buf[0] !== 0xff || buf[1] !== 0xd8) {
+    return res.status(400).json({ error: 'Нужна картинка в формате JPEG' });
+  }
+  const exists = await q('SELECT 1 FROM users WHERE id = $1', [to]);
+  if (!exists.rowCount) return res.status(404).json({ error: 'Получатель не найден' });
+  const caption = String(req.query.caption || '').trim().slice(0, 1000);
+  const r = await q(
+    `INSERT INTO messages (from_id, to_id, text, image) VALUES ($1, $2, $3, $4)
+     RETURNING id, from_id, to_id, text, created_at, true AS has_image`,
+    [req.user.id, to, caption, buf]
+  );
+  io.to('user:' + to).to('user:' + req.user.id).emit('message', r.rows[0]);
+  res.json({ ok: true });
+}));
+
+// Фото видят только отправитель и получатель
+app.get('/api/photo/:id', auth, wrap(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).end();
+  const r = await q(
+    'SELECT image FROM messages WHERE id = $1 AND image IS NOT NULL AND (from_id = $2 OR to_id = $2)',
+    [id, req.user.id]
+  );
+  if (!r.rows[0]) return res.status(404).end();
+  res.set({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=31536000, immutable' });
+  res.send(r.rows[0].image);
+}));
+
 // Список собеседников с последним сообщением для превью
 app.get('/api/users', auth, wrap(async (req, res) => {
   const r = await q(
-    `SELECT u.id, u.username, u.avatar_v, (u.avatar IS NOT NULL) AS has_avatar, lm.text AS last_text, lm.from_id AS last_from, lm.created_at AS last_at
+    `SELECT u.id, u.username, u.avatar_v, (u.avatar IS NOT NULL) AS has_avatar, lm.text AS last_text, lm.from_id AS last_from, lm.created_at AS last_at, lm.has_image AS last_image
      FROM users u
      LEFT JOIN LATERAL (
-       SELECT m.text, m.from_id, m.created_at FROM messages m
+       SELECT m.text, m.from_id, m.created_at, (m.image IS NOT NULL) AS has_image FROM messages m
        WHERE (m.from_id = u.id AND m.to_id = $1) OR (m.from_id = $1 AND m.to_id = u.id)
        ORDER BY m.id DESC LIMIT 1
      ) lm ON true
@@ -193,7 +227,7 @@ app.get('/api/messages/:peerId', auth, wrap(async (req, res) => {
   const before = Number(req.query.before) || 2147483647;
   const r = await q(
     `SELECT * FROM (
-       SELECT id, from_id, to_id, text, created_at FROM messages
+       SELECT id, from_id, to_id, text, created_at, (image IS NOT NULL) AS has_image FROM messages
        WHERE ((from_id = $1 AND to_id = $2) OR (from_id = $2 AND to_id = $1)) AND id < $3
        ORDER BY id DESC LIMIT 50
      ) t ORDER BY id`,
@@ -233,7 +267,7 @@ io.on('connection', (socket) => {
       const exists = await q('SELECT 1 FROM users WHERE id = $1', [toId]);
       if (!exists.rowCount) return;
       const r = await q(
-        'INSERT INTO messages (from_id, to_id, text) VALUES ($1, $2, $3) RETURNING id, from_id, to_id, text, created_at',
+        'INSERT INTO messages (from_id, to_id, text) VALUES ($1, $2, $3) RETURNING id, from_id, to_id, text, created_at, false AS has_image',
         [me, toId, text]
       );
       io.to('user:' + toId).to('user:' + me).emit('message', r.rows[0]);
