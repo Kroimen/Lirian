@@ -20,7 +20,7 @@ const online = new Set();   // id пользователей в сети
 
 const GRADS = [['#5d33b0', '#9b6dff'], ['#e11d48', '#fb7185'], ['#0891b2', '#22d3ee'],
                ['#ca8a04', '#facc15'], ['#059669', '#34d399'], ['#db2777', '#f472b6']];
-const gradient = (id) => `linear-gradient(135deg, ${GRADS[id % GRADS.length][0]}, ${GRADS[id % GRADS.length][1]})`;
+const gradient = (id) => `linear-gradient(135deg, ${GRADS[Math.abs(id) % GRADS.length][0]}, ${GRADS[Math.abs(id) % GRADS.length][1]})`;
 
 const toDate = (s) => new Date(s);
 const fmtTime = (d) => d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
@@ -56,38 +56,6 @@ async function api(path, opts = {}) {
   if (!r.ok) throw new Error(data.error || 'Ошибка сервера (' + r.status + ')');
   return data;
 }
-
-/* ---------- вход ---------- */
-async function authenticate(kind) {
-  const name = $('username').value.trim(), pass = $('password').value;
-  const err = $('err');
-  err.style.color = '';
-  if (!name || !pass) { err.textContent = 'Введите имя и пароль'; return; }
-  err.style.color = 'var(--text-muted)';
-  err.textContent = 'Отправляю запрос…';
-  const btns = [$('login'), $('register')];
-  btns.forEach((b) => (b.disabled = true));
-  const slow = setTimeout(() => {
-    err.style.color = 'var(--text-muted)';
-    err.textContent = 'Сервер просыпается, это может занять до минуты…';
-  }, 3000);
-  try {
-    const data = await api(kind, { method: 'POST', body: { username: name, password: pass } });
-    token = data.token; me = data.user;
-    store.set('token', token);
-    store.set('me', JSON.stringify(me));
-    start();
-  } catch (e) {
-    err.style.color = '';
-    err.textContent = e.message;
-  } finally {
-    clearTimeout(slow);
-    btns.forEach((b) => (b.disabled = false));
-  }
-}
-$('login').onclick = () => authenticate('login');
-$('register').onclick = () => authenticate('register');
-$('password').addEventListener('keydown', (e) => { if (e.key === 'Enter') authenticate('login'); });
 
 /* ---------- профиль и аватарка ---------- */
 function renderMe() {
@@ -162,6 +130,7 @@ async function start() {
   socket.on('online', (ids) => { online.clear(); ids.forEach((i) => online.add(i)); renderUsers(); updateHeader(); });
   socket.on('presence', ({ id, online: on }) => { on ? online.add(id) : online.delete(id); renderUsers(); updateHeader(); });
   socket.on('users-changed', loadUsers);
+  socket.on('groups-changed', loadUsers);
   socket.on('wallpaper-changed', async () => {
     try { me = await api('me'); store.set('me', JSON.stringify(me)); applyWallpaper(); } catch { /* ничего */ }
   });
@@ -179,7 +148,11 @@ async function start() {
 
 async function loadUsers() {
   users = await api('users');
-  if (peer) peer = users.find((x) => x.id === peer.id) || peer;
+  if (peer) {
+    const fresh = users.find((x) => x.id === peer.id);
+    if (fresh) { peer = fresh; updateHeader(); }
+    else if (peer.id < 0) closeChat();   // группу удалили или нас из неё убрали
+  }
   renderUsers();
 }
 
@@ -212,7 +185,8 @@ function renderUsers() {
     const bottom = el('div', 'chat-bottom');
     const prev = el('div', 'chat-preview');
     if (u.last_text || u.last_image) {
-      if (u.last_from === me.id && !isSelf(u)) prev.append(el('span', 'you', 'Вы · '));
+      const who = u.is_group ? (u.last_from === me.id ? 'Вы' : u.last_name) : (u.last_from === me.id && !isSelf(u) ? 'Вы' : '');
+      if (who) prev.append(el('span', 'you', who + ' · '));
       prev.append(document.createTextNode((u.last_image ? '📷 ' : '') + (u.last_text || (u.last_image ? 'Фото' : ''))));
     } else prev.textContent = isSelf(u) ? 'Заметки, ссылки и фото для себя' : 'Нет сообщений';
     bottom.append(prev);
@@ -227,10 +201,23 @@ function renderUsers() {
 $('search').addEventListener('input', renderUsers);
 
 /* ---------- чат ---------- */
+function closeChat() {
+  peer = null;
+  $('app').classList.remove('in-chat');
+  $('chatView').classList.add('hidden');
+  $('placeholder').classList.remove('hidden');
+}
+
 function updateHeader() {
   if (!peer) return;
+  document.querySelector('.header-info').classList.toggle('clickable', !!peer.is_group);
   $('headAvatar').replaceChildren(isSelf(peer) ? noteAvatar() : makeAvatar(peer, true));
   $('headName').textContent = displayName(peer);
+  if (peer.is_group) {
+    $('headStatus').textContent = plural(peer.members || 0);
+    $('headStatus').classList.add('off');
+    return;
+  }
   if (isSelf(peer)) {
     $('headStatus').textContent = 'видишь только ты';
     $('headStatus').classList.add('off');
@@ -275,6 +262,11 @@ function addMessage(m) {
   const meta = el('div', 'bubble-meta');
   meta.append(el('span', null, fmtTime(d)));
   if (out) meta.append(el('span', 'checks', '✓'));
+  if (m.group_id && !out) {
+    const who = el('div', 'sender', m.from_name || '');
+    who.style.color = GRADS[Math.abs(m.from_id) % GRADS.length][1];
+    bubble.append(who);
+  }
   if (m.has_image) {
     const img = el('img', 'msg-img');
     img.alt = 'Фото';
@@ -293,10 +285,10 @@ function addMessage(m) {
 }
 
 function onMessage(m) {
-  const otherId = m.from_id === me.id ? m.to_id : m.from_id;
+  const otherId = m.group_id ? m.to_id : (m.from_id === me.id ? m.to_id : m.from_id);
   const u = users.find((x) => x.id === otherId);
   if (u) {
-    u.last_text = m.text; u.last_from = m.from_id; u.last_at = m.created_at; u.last_image = m.has_image;
+    u.last_text = m.text; u.last_from = m.from_id; u.last_at = m.created_at; u.last_image = m.has_image; u.last_name = m.from_name;
     users.sort((a, b) => (b.last_at || '').localeCompare(a.last_at || '') || a.username.localeCompare(b.username));
   } else { loadUsers(); }
   if (peer && peer.id === otherId) addMessage(m);
@@ -348,6 +340,9 @@ $('text').addEventListener('input', (e) => {
 });
 
 initWallpapers();
-$('ver').textContent = 'версия 9 · готово';
+initSecurity();
+initAuth();
+initGroups();
+$('ver').textContent = 'версия 12 · готово';
 if (token && me) start();
 // END

@@ -55,6 +55,20 @@ async function init() {
     attempts INTEGER NOT NULL DEFAULT 0
   )`);
   await q('CREATE INDEX IF NOT EXISTS idx_pair ON messages (from_id, to_id, id)');
+  await q('ALTER TABLE messages ADD COLUMN IF NOT EXISTS group_id INTEGER');
+  await q(`CREATE TABLE IF NOT EXISTS chat_groups (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    owner_id INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+  await q(`CREATE TABLE IF NOT EXISTS group_members (
+    group_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (group_id, user_id)
+  )`);
+  await q('CREATE INDEX IF NOT EXISTS idx_group_msgs ON messages (group_id, id)');
 }
 
 const app = express();
@@ -65,7 +79,7 @@ const io = new Server(server);
 
 // Файлы лежат в корне репозитория, поэтому отдаём только нужные
 app.get('/', (req, res) => res.sendFile(__dirname + '/index.html'));
-for (const f of ['logo.jpg', 'base.css', 'extra.css', 'photos.js', 'wallpapers.js', 'security.js', 'auth.js', 'app.js', 'privacy.html']) {
+for (const f of ['logo.jpg', 'base.css', 'extra.css', 'photos.js', 'wallpapers.js', 'security.js', 'auth.js', 'groups.js', 'app.js', 'privacy.html']) {
   app.get('/' + f, (req, res) => res.sendFile(__dirname + '/' + f));
 }
 
@@ -92,7 +106,7 @@ fetch('/').then(function (r) {
   log('Есть конец файла: ' + (t.indexOf('</ht' + 'ml>') > -1));
   log('Скрипт-блоков в ней: ' + (t.split('<scr' + 'ipt').length - 1));
 }).catch(function (e) { log('Главная страница, ошибка: ' + e.message); });
-['/', '/base.css', '/extra.css', '/photos.js', '/wallpapers.js', '/security.js', '/auth.js', '/app.js'].forEach(function (u) {
+['/', '/base.css', '/extra.css', '/photos.js', '/wallpapers.js', '/security.js', '/auth.js', '/groups.js', '/app.js'].forEach(function (u) {
   fetch(u, { cache: 'no-store' }).then(function (r) { return r.text(); }).then(function (t) {
     var ok = t.slice(-30).indexOf('END') > -1 || t.indexOf('</ht' + 'ml>') > -1;
     log('Файл ' + u + ': ' + t.length + ' символов, конец на месте: ' + ok);
@@ -127,7 +141,9 @@ const auth = wrap(async (req, res, next) => {
 
 // Остальные маршруты вынесены в отдельные файлы
 require('./routes-auth')({ app, io, q, auth, wrap, sign, SECRET });
-require('./routes-media')({ app, io, q, auth, wrap });
+const chat = require('./chatcore')({ q, io });
+require('./routes-media')({ app, io, q, auth, wrap, chat });
+require('./routes-groups')({ app, io, q, auth, wrap });
 
 // Список собеседников с последним сообщением для превью
 app.get('/api/users', auth, wrap(async (req, res) => {
@@ -142,7 +158,22 @@ app.get('/api/users', auth, wrap(async (req, res) => {
      ORDER BY lm.created_at DESC NULLS LAST, u.username`,
     [req.user.id]
   );
-  res.json(r.rows);
+  // Группы идут в тот же список; у них отрицательный id, а название лежит в username
+  const g = await q(
+    `SELECT -cg.id AS id, cg.name AS username, true AS is_group, false AS has_avatar, 0 AS avatar_v,
+            (SELECT count(*)::int FROM group_members WHERE group_id = cg.id) AS members,
+            lm.text AS last_text, lm.from_id AS last_from, lm.created_at AS last_at, lm.has_image AS last_image, lm.from_name AS last_name
+     FROM chat_groups cg
+     JOIN group_members gm ON gm.group_id = cg.id AND gm.user_id = $1
+     LEFT JOIN LATERAL (
+       SELECT m.text, m.from_id, m.created_at, (m.image IS NOT NULL) AS has_image, u.username AS from_name
+       FROM messages m JOIN users u ON u.id = m.from_id
+       WHERE m.group_id = cg.id ORDER BY m.id DESC LIMIT 1
+     ) lm ON true`,
+    [req.user.id]
+  );
+  const stamp = (x) => (x.last_at ? new Date(x.last_at).getTime() : 0);
+  res.json([...r.rows, ...g.rows].sort((a, b) => stamp(b) - stamp(a) || String(a.username).localeCompare(String(b.username))));
 }));
 
 // История переписки; ?before=<id> подгружает более старые сообщения
@@ -150,6 +181,22 @@ app.get('/api/messages/:peerId', auth, wrap(async (req, res) => {
   const peer = Number(req.params.peerId);
   if (!Number.isInteger(peer)) return res.status(400).json({ error: 'Неверный собеседник' });
   const before = Number(req.query.before) || 2147483647;
+  if (peer < 0) {
+    const gid = -peer;
+    const ok = await q('SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2', [gid, req.user.id]);
+    if (!ok.rowCount) return res.status(404).json({ error: 'Группа не найдена' });
+    const gm = await q(
+      `SELECT * FROM (
+         SELECT m.id, m.from_id, -m.group_id AS to_id, m.group_id, m.text, m.created_at,
+                (m.image IS NOT NULL) AS has_image, u.username AS from_name
+         FROM messages m JOIN users u ON u.id = m.from_id
+         WHERE m.group_id = $1 AND m.id < $2 ORDER BY m.id DESC LIMIT 50
+       ) t ORDER BY id`,
+      [gid, before]
+    );
+    return res.json(gm.rows);
+  }
+  if (peer < 1) return res.status(400).json({ error: 'Неверный собеседник' });
   const r = await q(
     `SELECT * FROM (
        SELECT id, from_id, to_id, text, created_at, (image IS NOT NULL) AS has_image FROM messages
@@ -188,14 +235,8 @@ io.on('connection', (socket) => {
       const { to, text: raw } = data || {};
       const text = String(raw || '').trim().slice(0, 4000);
       const toId = Number(to);
-      if (!text || !Number.isInteger(toId)) return;
-      const exists = await q('SELECT 1 FROM users WHERE id = $1', [toId]);
-      if (!exists.rowCount) return;
-      const r = await q(
-        'INSERT INTO messages (from_id, to_id, text) VALUES ($1, $2, $3) RETURNING id, from_id, to_id, text, created_at, false AS has_image',
-        [me, toId, text]
-      );
-      io.to('user:' + toId).to('user:' + me).emit('message', r.rows[0]);
+      if (!text || !Number.isInteger(toId) || toId === 0) return;
+      await chat.send(me, toId, text, null);
     } catch (e) {
       console.error(e);
     }
