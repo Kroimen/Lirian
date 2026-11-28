@@ -2,10 +2,13 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const { Pool } = require('pg');
-const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
-const SECRET = process.env.JWT_SECRET || 'change-me-in-production';
+const SECRET = process.env.JWT_SECRET;
+if (!SECRET || SECRET.length < 20) {
+  console.error('Задай переменную JWT_SECRET: длинная случайная строка, от 20 символов');
+  process.exit(1);
+}
 
 if (!process.env.DATABASE_URL) {
   console.error('Не задана переменная окружения DATABASE_URL (строка подключения к PostgreSQL)');
@@ -41,17 +44,28 @@ async function init() {
   await q("ALTER TABLE users ADD COLUMN IF NOT EXISTS wallpaper TEXT NOT NULL DEFAULT ''");
   await q('ALTER TABLE users ADD COLUMN IF NOT EXISTS wallpaper_img BYTEA');
   await q('ALTER TABLE users ADD COLUMN IF NOT EXISTS wallpaper_v INTEGER NOT NULL DEFAULT 0');
+  await q('ALTER TABLE users ADD COLUMN IF NOT EXISTS token_v INTEGER NOT NULL DEFAULT 0');
+  await q('ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT');
+  await q('ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL');
+  await q('CREATE UNIQUE INDEX IF NOT EXISTS users_email_key ON users (email)');
+  await q(`CREATE TABLE IF NOT EXISTS login_codes (
+    email TEXT PRIMARY KEY,
+    code_hash TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0
+  )`);
   await q('CREATE INDEX IF NOT EXISTS idx_pair ON messages (from_id, to_id, id)');
 }
 
 const app = express();
+app.set('trust proxy', 1);   // Render стоит за прокси, нужно для определения IP
 app.use(express.json());
 const server = http.createServer(app);
 const io = new Server(server);
 
 // Файлы лежат в корне репозитория, поэтому отдаём только нужные
 app.get('/', (req, res) => res.sendFile(__dirname + '/index.html'));
-for (const f of ['logo.jpg', 'base.css', 'extra.css', 'photos.js', 'wallpapers.js', 'app.js']) {
+for (const f of ['logo.jpg', 'base.css', 'extra.css', 'photos.js', 'wallpapers.js', 'security.js', 'auth.js', 'app.js', 'privacy.html']) {
   app.get('/' + f, (req, res) => res.sendFile(__dirname + '/' + f));
 }
 
@@ -78,7 +92,7 @@ fetch('/').then(function (r) {
   log('Есть конец файла: ' + (t.indexOf('</ht' + 'ml>') > -1));
   log('Скрипт-блоков в ней: ' + (t.split('<scr' + 'ipt').length - 1));
 }).catch(function (e) { log('Главная страница, ошибка: ' + e.message); });
-['/', '/base.css', '/extra.css', '/photos.js', '/wallpapers.js', '/app.js'].forEach(function (u) {
+['/', '/base.css', '/extra.css', '/photos.js', '/wallpapers.js', '/security.js', '/auth.js', '/app.js'].forEach(function (u) {
   fetch(u, { cache: 'no-store' }).then(function (r) { return r.text(); }).then(function (t) {
     var ok = t.slice(-30).indexOf('END') > -1 || t.indexOf('</ht' + 'ml>') > -1;
     log('Файл ' + u + ': ' + t.length + ' символов, конец на месте: ' + ok);
@@ -94,7 +108,8 @@ const wrap = (fn) => (req, res, next) =>
     res.status(500).json({ error: 'Ошибка сервера, попробуйте ещё раз' });
   });
 
-const sign = (u) => jwt.sign({ id: u.id, username: u.username }, SECRET, { expiresIn: '30d' });
+// tv — номер «поколения» входов: смена пароля или выход везде делают старые токены недействительными
+const sign = (u) => jwt.sign({ id: u.id, username: u.username, tv: u.token_v || 0 }, SECRET, { expiresIn: '30d' });
 
 // Токен должен быть верным, а пользователь — существовать в базе
 const auth = wrap(async (req, res, next) => {
@@ -104,146 +119,15 @@ const auth = wrap(async (req, res, next) => {
   } catch {
     return res.status(401).json({ error: 'Требуется вход' });
   }
-  const r = await q('SELECT id, username FROM users WHERE id = $1', [payload.id]);
-  if (!r.rows[0]) return res.status(401).json({ error: 'Требуется вход' });
+  const r = await q('SELECT id, username, token_v FROM users WHERE id = $1', [payload.id]);
+  if (!r.rows[0] || r.rows[0].token_v !== (payload.tv || 0)) return res.status(401).json({ error: 'Требуется вход' });
   req.user = r.rows[0];
   next();
 });
 
-app.post('/api/register', wrap(async (req, res) => {
-  const { username, password } = req.body || {};
-  if (!/^[\p{L}\d_.-]{3,20}$/u.test(username || '') || (password || '').length < 6) {
-    return res.status(400).json({ error: 'Имя: 3–20 символов (буквы, цифры, _ . -), пароль: от 6 символов' });
-  }
-  try {
-    const hash = await bcrypt.hash(password, 10);
-    const r = await q('INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id, username', [username, hash]);
-    const user = { ...r.rows[0], has_avatar: false, avatar_v: 0 };
-    io.emit('users-changed');
-    res.json({ token: sign(user), user });
-  } catch (e) {
-    if (e.code === '23505') return res.status(409).json({ error: 'Это имя уже занято' });
-    throw e;
-  }
-}));
-
-app.post('/api/login', wrap(async (req, res) => {
-  const { username, password } = req.body || {};
-  const r = await q(
-    'SELECT id, username, password_hash, avatar_v, (avatar IS NOT NULL) AS has_avatar FROM users WHERE username = $1',
-    [String(username || '')]
-  );
-  const row = r.rows[0];
-  if (!row || !(await bcrypt.compare(String(password || ''), row.password_hash))) {
-    return res.status(401).json({ error: 'Неверное имя или пароль' });
-  }
-  const user = { id: row.id, username: row.username, has_avatar: row.has_avatar, avatar_v: row.avatar_v };
-  res.json({ token: sign(user), user });
-}));
-
-app.get('/api/me', auth, wrap(async (req, res) => {
-  const r = await q(
-    `SELECT id, username, avatar_v, (avatar IS NOT NULL) AS has_avatar,
-            wallpaper, wallpaper_v, (wallpaper_img IS NOT NULL) AS has_wallpaper_img
-     FROM users WHERE id = $1`,
-    [req.user.id]
-  );
-  res.json(r.rows[0]);
-}));
-
-// Аватарки хранятся в базе (клиент заранее уменьшает их до 256x256 JPEG)
-app.get('/api/avatar/:id', wrap(async (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id)) return res.status(404).end();
-  const r = await q('SELECT avatar FROM users WHERE id = $1', [id]);
-  const buf = r.rows[0] && r.rows[0].avatar;
-  if (!buf) return res.status(404).end();
-  res.set({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=31536000, immutable' });
-  res.send(buf);
-}));
-
-app.put('/api/avatar', auth, express.raw({ type: 'image/*', limit: '300kb' }), wrap(async (req, res) => {
-  const buf = req.body;
-  if (!Buffer.isBuffer(buf) || buf.length < 100 || buf[0] !== 0xff || buf[1] !== 0xd8) {
-    return res.status(400).json({ error: 'Нужна картинка в формате JPEG' });
-  }
-  const r = await q('UPDATE users SET avatar = $1, avatar_v = avatar_v + 1 WHERE id = $2 RETURNING avatar_v', [buf, req.user.id]);
-  io.emit('avatar-changed', { id: req.user.id, has: true, v: r.rows[0].avatar_v });
-  res.json({ avatar_v: r.rows[0].avatar_v });
-}));
-
-app.delete('/api/avatar', auth, wrap(async (req, res) => {
-  const r = await q('UPDATE users SET avatar = NULL, avatar_v = avatar_v + 1 WHERE id = $1 RETURNING avatar_v', [req.user.id]);
-  io.emit('avatar-changed', { id: req.user.id, has: false, v: r.rows[0].avatar_v });
-  res.json({ avatar_v: r.rows[0].avatar_v });
-}));
-
-// Обои чата: готовый узор (id задаёт клиент) или своё фото
-app.put('/api/wallpaper', auth, wrap(async (req, res) => {
-  const w = String((req.body || {}).wallpaper || '');
-  if (!/^[a-z]{0,20}$/.test(w)) return res.status(400).json({ error: 'Неверные обои' });
-  const r = await q(
-    "UPDATE users SET wallpaper = $1 WHERE id = $2 AND ($1 <> 'custom' OR wallpaper_img IS NOT NULL) RETURNING id",
-    [w, req.user.id]
-  );
-  if (!r.rowCount) return res.status(400).json({ error: 'Сначала загрузи своё фото' });
-  io.to('user:' + req.user.id).emit('wallpaper-changed');
-  res.json({ wallpaper: w });
-}));
-
-app.put('/api/wallpaper-image', auth, express.raw({ type: 'image/*', limit: '2mb' }), wrap(async (req, res) => {
-  const buf = req.body;
-  if (!Buffer.isBuffer(buf) || buf.length < 100 || buf[0] !== 0xff || buf[1] !== 0xd8) {
-    return res.status(400).json({ error: 'Нужна картинка в формате JPEG' });
-  }
-  const r = await q(
-    "UPDATE users SET wallpaper_img = $1, wallpaper = 'custom', wallpaper_v = wallpaper_v + 1 WHERE id = $2 RETURNING wallpaper_v",
-    [buf, req.user.id]
-  );
-  io.to('user:' + req.user.id).emit('wallpaper-changed');
-  res.json({ wallpaper: 'custom', wallpaper_v: r.rows[0].wallpaper_v });
-}));
-
-app.get('/api/wallpaper-image', auth, wrap(async (req, res) => {
-  const r = await q('SELECT wallpaper_img FROM users WHERE id = $1', [req.user.id]);
-  const buf = r.rows[0] && r.rows[0].wallpaper_img;
-  if (!buf) return res.status(404).end();
-  res.set({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, no-cache' });
-  res.send(buf);
-}));
-
-// Фото в сообщениях (клиент заранее сжимает их до 1280 px JPEG)
-app.post('/api/photo/:to', auth, express.raw({ type: 'image/*', limit: '1500kb' }), wrap(async (req, res) => {
-  const to = Number(req.params.to);
-  const buf = req.body;
-  if (!Number.isInteger(to)) return res.status(400).json({ error: 'Неверный получатель' });
-  if (!Buffer.isBuffer(buf) || buf.length < 100 || buf[0] !== 0xff || buf[1] !== 0xd8) {
-    return res.status(400).json({ error: 'Нужна картинка в формате JPEG' });
-  }
-  const exists = await q('SELECT 1 FROM users WHERE id = $1', [to]);
-  if (!exists.rowCount) return res.status(404).json({ error: 'Получатель не найден' });
-  const caption = String(req.query.caption || '').trim().slice(0, 1000);
-  const r = await q(
-    `INSERT INTO messages (from_id, to_id, text, image) VALUES ($1, $2, $3, $4)
-     RETURNING id, from_id, to_id, text, created_at, true AS has_image`,
-    [req.user.id, to, caption, buf]
-  );
-  io.to('user:' + to).to('user:' + req.user.id).emit('message', r.rows[0]);
-  res.json({ ok: true });
-}));
-
-// Фото видят только отправитель и получатель
-app.get('/api/photo/:id', auth, wrap(async (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id)) return res.status(404).end();
-  const r = await q(
-    'SELECT image FROM messages WHERE id = $1 AND image IS NOT NULL AND (from_id = $2 OR to_id = $2)',
-    [id, req.user.id]
-  );
-  if (!r.rows[0]) return res.status(404).end();
-  res.set({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=31536000, immutable' });
-  res.send(r.rows[0].image);
-}));
+// Остальные маршруты вынесены в отдельные файлы
+require('./routes-auth')({ app, io, q, auth, wrap, sign, SECRET });
+require('./routes-media')({ app, io, q, auth, wrap });
 
 // Список собеседников с последним сообщением для превью
 app.get('/api/users', auth, wrap(async (req, res) => {
@@ -280,8 +164,8 @@ app.get('/api/messages/:peerId', auth, wrap(async (req, res) => {
 io.use(async (socket, next) => {
   try {
     const p = jwt.verify(socket.handshake.auth.token, SECRET);
-    const r = await q('SELECT id, username FROM users WHERE id = $1', [p.id]);
-    if (!r.rows[0]) throw new Error('no user');
+    const r = await q('SELECT id, username, token_v FROM users WHERE id = $1', [p.id]);
+    if (!r.rows[0] || r.rows[0].token_v !== (p.tv || 0)) throw new Error('no user');
     socket.user = r.rows[0];
     next();
   } catch {
